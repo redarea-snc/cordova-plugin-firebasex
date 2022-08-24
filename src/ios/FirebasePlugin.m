@@ -135,7 +135,7 @@ static NSMutableDictionary* traces;
 
         // Initialize categories
         [[UNUserNotificationCenter currentNotificationCenter] setNotificationCategories:categories];
-        
+
         // Initialize installation ID change listner
         __weak __auto_type weakSelf = self;
         self.installationIDObserver = [[NSNotificationCenter defaultCenter]
@@ -306,7 +306,7 @@ static NSMutableDictionary* traces;
                             authOptions = authOptions|UNAuthorizationOptionProvidesAppNotificationSettings;
                         }
                     }
-                
+
                     [[UNUserNotificationCenter currentNotificationCenter]
                      requestAuthorizationWithOptions:authOptions
                      completionHandler:^(BOOL granted, NSError * _Nullable error) {
@@ -1056,7 +1056,22 @@ static NSMutableDictionary* traces;
     [self.commandDelegate runInBackground:^{
         @try {
             NSString* name = [command.arguments objectAtIndex:0];
-            NSDictionary *parameters = [command argumentAtIndex:1];
+            NSMutableDictionary *parameters = [command argumentAtIndex:1];
+
+            // FirebaseAnalytics silently converts any item quantity that is not an
+            /// integer to zero, this includes any NSNumber or string value passed
+            NSMutableArray *items = [parameters objectForKey:@"items"];
+            if (items) {
+                for (int idx = 0; idx < [items count]; idx++) {
+                    NSMutableDictionary *item = [items objectAtIndex:idx];
+
+                    NSNumber *quantity = [item objectForKey:@"quantity"];
+                    int intValue = [quantity intValue];
+                    [item setObject:[NSNumber numberWithInt:intValue] forKey:@"quantity"];
+                    [items setObject:item atIndexedSubscript:idx];
+                }
+                [parameters setObject:items forKey:@"items"];
+            }
 
             [FIRAnalytics logEventWithName:name parameters:parameters];
 
@@ -1468,7 +1483,7 @@ static NSMutableDictionary* traces;
     [self.commandDelegate runInBackground:^{
         @try {
             NSString* traceName = [command.arguments objectAtIndex:0];
-            
+
             @synchronized (traces) {
                 FIRTrace* trace = [traces objectForKey:traceName];
 
@@ -1477,7 +1492,7 @@ static NSMutableDictionary* traces;
                     [traces setObject:trace forKey:traceName ];
                 }
             }
-            
+
             CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
         }@catch (NSException *exception) {
@@ -1981,7 +1996,7 @@ static NSMutableDictionary* traces;
 
 - (void) getInstallationToken:(CDVInvokedUrlCommand*)command {
     [self.commandDelegate runInBackground:^{
-        @try {            
+        @try {
             [[FIRInstallations installations] authTokenForcingRefresh:true
                                                            completion:^(FIRInstallationsAuthTokenResult *result, NSError *error) {
               if (error != nil) {
