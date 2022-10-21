@@ -71,7 +71,7 @@ static NSMutableDictionary* traces;
         googlePlist = [NSMutableDictionary dictionaryWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"GoogleService-Info" ofType:@"plist"]];
 
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applicationLaunchedWithUrl:) name:CDVPluginHandleOpenURLNotification object:nil];
-        
+
         if([self getGooglePlistFlagWithDefaultValue:FirebaseCrashlyticsCollectionEnabled defaultValue:YES]){
             [self setPreferenceFlag:FIREBASE_CRASHLYTICS_COLLECTION_ENABLED flag:YES];
         }
@@ -1255,7 +1255,22 @@ static NSMutableDictionary* traces;
     [self.commandDelegate runInBackground:^{
         @try {
             NSString* name = [command.arguments objectAtIndex:0];
-            NSDictionary *parameters = [command argumentAtIndex:1];
+            NSMutableDictionary *parameters = [command argumentAtIndex:1];
+
+            // FirebaseAnalytics silently converts any item quantity that is not an
+            /// integer to zero, this includes any NSNumber or string value passed
+            NSMutableArray *items = [parameters objectForKey:@"items"];
+            if (items) {
+                for (int idx = 0; idx < [items count]; idx++) {
+                    NSMutableDictionary *item = [items objectAtIndex:idx];
+
+                    NSNumber *quantity = [item objectForKey:@"quantity"];
+                    int intValue = [quantity intValue];
+                    [item setObject:[NSNumber numberWithInt:intValue] forKey:@"quantity"];
+                    [items setObject:item atIndexedSubscript:idx];
+                }
+                [parameters setObject:items forKey:@"items"];
+            }
 
             [FIRAnalytics logEventWithName:name parameters:parameters];
 
@@ -1746,7 +1761,7 @@ static NSMutableDictionary* traces;
 
             NSMutableDictionary *document_mutable = [document mutableCopy];
 
-            if(timestamp){                
+            if(timestamp){
                 document_mutable[@"created"] = [FIRTimestamp timestampWithDate:[NSDate date]];
                 document_mutable[@"lastUpdate"] = [FIRTimestamp timestampWithDate:[NSDate date]];
             }
