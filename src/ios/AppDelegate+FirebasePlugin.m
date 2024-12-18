@@ -1,6 +1,6 @@
 #import "AppDelegate+FirebasePlugin.h"
 #import "FirebasePlugin.h"
-#import "Firebase.h"
+#import "FirebaseWrapper.h"
 #import <objc/runtime.h>
 
 
@@ -17,15 +17,20 @@
 @implementation AppDelegate (FirebasePlugin)
 
 static AppDelegate* instance;
-static id <UNUserNotificationCenterDelegate> _previousDelegate;
 
 + (AppDelegate*) instance {
     return instance;
 }
 
 static NSDictionary* mutableUserInfo;
+
 static FIRAuthStateDidChangeListenerHandle authStateChangeListener;
 static bool authStateChangeListenerInitialized = false;
+
+static FIRIDTokenDidChangeListenerHandle authIdTokenChangeListener;
+static NSString* currentIdToken = @"";
+
+static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterDelegate = nil;
 
 + (void)load {
     Method original = class_getInstanceMethod(self, @selector(application:didFinishLaunchingWithOptions:));
@@ -43,6 +48,11 @@ static bool authStateChangeListenerInitialized = false;
 
 - (BOOL)application:(UIApplication *)application swizzledDidFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     [self application:application swizzledDidFinishLaunchingWithOptions:launchOptions];
+    
+    #if DEBUG
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"/google/firebase/debug_mode"];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"/google/measurement/debug_mode"];
+    #endif
     
     @try{
         instance = self;
@@ -72,19 +82,22 @@ static bool authStateChangeListenerInitialized = false;
             // Assume that another call (probably from another plugin) did so with the plist
             isFirebaseInitializedWithPlist = true;
         }
-    
-        // Set UNUserNotificationCenter delegate
-        if ([UNUserNotificationCenter currentNotificationCenter].delegate != nil) {
-            _previousDelegate = [UNUserNotificationCenter currentNotificationCenter].delegate;
-        }
-        [UNUserNotificationCenter currentNotificationCenter].delegate = self;
 
-        // Set FCM messaging delegate
-        [FIRMessaging messaging].delegate = self;
-        
+        if (self.isFCMEnabled) {
+            // Setting the delegate even if FCM is disabled would cause conflicts with other plugins dealing
+            // with push notifications (e.g. `urbanairship-cordova`).
+            _prevUserNotificationCenterDelegate = [UNUserNotificationCenter currentNotificationCenter].delegate;
+            [UNUserNotificationCenter currentNotificationCenter].delegate = self;
+            
+            // Set FCM messaging delegate
+            [FIRMessaging messaging].delegate = self;
+        } else {
+            // This property is persistent thus ensuring it stays in sync with FCM settings in newer versions of the app.
+            [[FIRMessaging messaging] setAutoInitEnabled:NO];
+        }
+    
         // Setup Firestore
         [FirebasePlugin setFirestore:[FIRFirestore firestore]];
-        
         
         authStateChangeListener = [[FIRAuth auth] addAuthStateDidChangeListener:^(FIRAuth * _Nonnull auth, FIRUser * _Nullable user) {
             @try {
@@ -97,7 +110,35 @@ static bool authStateChangeListenerInitialized = false;
                 [FirebasePlugin.firebasePlugin handlePluginExceptionWithoutContext:exception];
             }
         }];
-
+        
+        authIdTokenChangeListener = [[FIRAuth auth] addIDTokenDidChangeListener:^(FIRAuth * _Nonnull auth, FIRUser * _Nullable user) {
+            @try {
+                if(![FIRAuth auth].currentUser){
+                    [FirebasePlugin.firebasePlugin executeGlobalJavascript:@"FirebasePlugin._onAuthIdTokenChange()"];
+                    return;
+                }
+                FIRUser* user = [FIRAuth auth].currentUser;
+                [user getIDTokenWithCompletion:^(NSString * _Nullable token, NSError * _Nullable error) {
+                    if(error == nil){
+                        
+                        
+                        if([token isEqualToString:currentIdToken]) return;;
+                        currentIdToken = token;
+                        [user getIDTokenResultWithCompletion:^(FIRAuthTokenResult * _Nullable tokenResult, NSError * _Nullable error) {
+                            if(error == nil){
+                                [FirebasePlugin.firebasePlugin executeGlobalJavascript:[NSString stringWithFormat:@"FirebasePlugin._onAuthIdTokenChange({\"idToken\": \"%@\", \"providerId\": \"%@\"})", token, tokenResult.signInProvider]];
+                            }else{
+                                [FirebasePlugin.firebasePlugin executeGlobalJavascript:[NSString stringWithFormat:@"FirebasePlugin._onAuthIdTokenChange({\"idToken\": \"%@\"})", token]];
+                            }
+                        }];
+                    }else{
+                        [FirebasePlugin.firebasePlugin executeGlobalJavascript:@"FirebasePlugin._onAuthIdTokenChange()"];
+                    }
+                }];
+            }@catch (NSException *exception) {
+                [FirebasePlugin.firebasePlugin executeGlobalJavascript:@"FirebasePlugin._onAuthIdTokenChange()"];
+            }
+        }];
 
         self.applicationInBackground = @(YES);
         
@@ -108,14 +149,31 @@ static bool authStateChangeListenerInitialized = false;
     return YES;
 }
 
+- (BOOL)isFCMEnabled {
+    return FirebasePlugin.firebasePlugin.isFCMEnabled;
+}
+
 - (void)applicationDidBecomeActive:(UIApplication *)application {
     self.applicationInBackground = @(NO);
-    [FirebasePlugin.firebasePlugin _logMessage:@"Enter foreground"];
+    @try {
+        [FirebasePlugin.firebasePlugin _logMessage:@"Enter foreground"];
+        [FirebasePlugin.firebasePlugin executeGlobalJavascript:@"FirebasePlugin._applicationDidBecomeActive()"];
+        [FirebasePlugin.firebasePlugin sendPendingNotifications];
+    }@catch (NSException *exception) {
+        [FirebasePlugin.firebasePlugin handlePluginExceptionWithoutContext:exception];
+    }
+    
+    [FirebasePlugin.firebasePlugin sendPendingNotifications];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
     self.applicationInBackground = @(YES);
-    [FirebasePlugin.firebasePlugin _logMessage:@"Enter background"];
+    @try {
+        [FirebasePlugin.firebasePlugin _logMessage:@"Enter background"];
+        [FirebasePlugin.firebasePlugin executeGlobalJavascript:@"FirebasePlugin._applicationDidEnterBackground()"];
+    }@catch (NSException *exception) {
+        [FirebasePlugin.firebasePlugin handlePluginExceptionWithoutContext:exception];
+    }
 }
 
 
@@ -130,6 +188,9 @@ static bool authStateChangeListenerInitialized = false;
 }
 
 - (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
+    if (!self.isFCMEnabled) {
+        return;
+    }
     [FIRMessaging messaging].APNSToken = deviceToken;
     [FirebasePlugin.firebasePlugin _logMessage:[NSString stringWithFormat:@"didRegisterForRemoteNotificationsWithDeviceToken: %@", deviceToken]];
     [FirebasePlugin.firebasePlugin sendApnsToken:[FirebasePlugin.firebasePlugin hexadecimalStringFromData:deviceToken]];
@@ -140,6 +201,10 @@ static bool authStateChangeListenerInitialized = false;
 - (void)application:(UIApplication *)application didReceiveRemoteNotification:(NSDictionary *)userInfo
     fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
 
+    if (!self.isFCMEnabled) {
+        return;
+    }
+    
     @try{
         [[FIRMessaging messaging] appDidReceiveMessage:userInfo];
         mutableUserInfo = [userInfo mutableCopy];
@@ -285,6 +350,9 @@ static bool authStateChangeListenerInitialized = false;
 }
 
 - (void)application:(UIApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
+    if (!self.isFCMEnabled) {
+        return;
+    }
     [FirebasePlugin.firebasePlugin _logError:[NSString stringWithFormat:@"didFailToRegisterForRemoteNotificationsWithError: %@", error.description]];
 }
 
@@ -306,12 +374,14 @@ static bool authStateChangeListenerInitialized = false;
     
     @try{
 
-        if (![notification.request.trigger isKindOfClass:UNPushNotificationTrigger.class] && ![notification.request.trigger isKindOfClass:UNTimeIntervalNotificationTrigger.class]){
-            if (_previousDelegate) {
+        if (![notification.request.trigger isKindOfClass:UNPushNotificationTrigger.class] && ![notification.request.trigger isKindOfClass:UNTimeIntervalNotificationTrigger.class]) {
+            if (_prevUserNotificationCenterDelegate) {
                 // bubbling notification
-                [_previousDelegate userNotificationCenter:center
-                          willPresentNotification:notification
-                            withCompletionHandler:completionHandler];
+                [_prevUserNotificationCenterDelegate
+                    userNotificationCenter:center
+                    willPresentNotification:notification
+                    withCompletionHandler:completionHandler
+                ];
                 return;
             } else {
                 [FirebasePlugin.firebasePlugin _logError:@"willPresentNotification: aborting as not a supported UNNotificationTrigger"];
@@ -382,12 +452,14 @@ static bool authStateChangeListenerInitialized = false;
 {
     @try{
         
-        if (![response.notification.request.trigger isKindOfClass:UNPushNotificationTrigger.class] && ![response.notification.request.trigger isKindOfClass:UNTimeIntervalNotificationTrigger.class]){
-            if (_previousDelegate) {
+        if (![response.notification.request.trigger isKindOfClass:UNPushNotificationTrigger.class] && ![response.notification.request.trigger isKindOfClass:UNTimeIntervalNotificationTrigger.class]) {
+            if (_prevUserNotificationCenterDelegate) {
                 // bubbling event
-                [_previousDelegate userNotificationCenter:center
-                               didReceiveNotificationResponse:response
-                            withCompletionHandler:completionHandler];
+                [_prevUserNotificationCenterDelegate
+                	userNotificationCenter:center
+                	didReceiveNotificationResponse:response
+                	withCompletionHandler:completionHandler
+                ];
                 return;
             } else {
                 [FirebasePlugin.firebasePlugin _logMessage:@"didReceiveNotificationResponse: aborting as not a supported UNNotificationTrigger"];
@@ -459,6 +531,9 @@ static bool authStateChangeListenerInitialized = false;
                     NSMutableDictionary* result = [[NSMutableDictionary alloc] init];
                     [result setValue:@"true" forKey:@"instantVerification"];
                     [result setValue:key forKey:@"id"];
+                    [result setValue:idToken forKey:@"idToken"];
+                    [result setValue:rawNonce forKey:@"rawNonce"];
+
                     if(appleIDCredential.fullName != nil){
                         if(appleIDCredential.fullName.givenName != nil){
                             [result setValue:appleIDCredential.fullName.givenName forKey:@"givenName"];
