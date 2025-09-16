@@ -1,5 +1,6 @@
 package org.apache.cordova.firebase;
 
+import android.annotation.SuppressLint;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -209,6 +210,7 @@ public class FirebasePluginMessagingService extends FirebaseMessagingService {
         }
     }
 
+    @SuppressLint("NotificationTrampoline")
     private void sendMessage(RemoteMessage remoteMessage, Map<String, String> data, String messageType, String id, String title, String body, String bodyHtml, boolean showNotification, String sound, String vibrate, String light, String color, String icon, String channelId, String priority, String visibility, String image, String imageType) {
         Log.d(TAG, "sendMessage(): messageType="+messageType+"; showNotification="+showNotification+"; id="+id+"; title="+title+"; body="+body+"; sound="+sound+"; vibrate="+vibrate+"; light="+light+"; color="+color+"; icon="+icon+"; channel="+channelId+"; data="+data.toString());
         Bundle bundle = new Bundle();
@@ -365,7 +367,7 @@ public class FirebasePluginMessagingService extends FirebaseMessagingService {
                         bitmap = getCircleBitmap(bitmap);
                     }
                     else if(imageTypeBigPicture.equalsIgnoreCase(imageType)) {
-                        notificationBuilder.setStyle(new NotificationCompat.BigPictureStyle().bigPicture(bitmap).bigLargeIcon(null));
+                        notificationBuilder.setStyle(new NotificationCompat.BigPictureStyle().bigPicture(bitmap).bigLargeIcon((Bitmap) null));
                     }
                     notificationBuilder.setLargeIcon(bitmap);
                 }
